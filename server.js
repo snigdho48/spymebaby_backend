@@ -1,12 +1,14 @@
 require("dotenv").config();
 const app = require("./src/app");
 const { ping } = require("./src/config/db");
+const { migrate } = require("./src/db/migrate");
 
 const PORT = process.env.PORT || 3001;
 
 (async () => {
   try {
     await ping();
+    await migrate();
     console.log("MySQL connection OK.");
   } catch (err) {
     console.error(

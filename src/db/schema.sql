@@ -45,6 +45,8 @@ CREATE TABLE IF NOT EXISTS tracking_events (
   browser VARCHAR(50) DEFAULT 'Other',
   os VARCHAR(50) DEFAULT 'Other',
   client_ip VARCHAR(64),
+  latitude DECIMAL(10, 7),
+  longitude DECIMAL(10, 7),
   portal_url VARCHAR(255),
   user_agent TEXT,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,

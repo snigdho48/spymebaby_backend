@@ -2,6 +2,7 @@ const express = require('express');
 const { pool } = require('../config/db');
 const { authRequired } = require('../middleware/auth');
 const { parseUserAgent } = require('../utils/ua');
+const { resolveIpLocation, coordKey, parseCoord } = require('../utils/geoip');
 
 const router = express.Router();
 
@@ -57,12 +58,24 @@ router.get('/track', async (req, res) => {
       req.socket?.remoteAddress ||
       '';
     const portalUrl = req.query.portal_url || '';
+    const geo = await resolveIpLocation(clientIp);
 
     await pool.query(
       `INSERT INTO tracking_events
-         (tracker_uuid, content_uuid, type, browser, os, client_ip, portal_url, user_agent)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [tracker_uuid, content.uuid, type, browser, os, clientIp, portalUrl, userAgent]
+         (tracker_uuid, content_uuid, type, browser, os, client_ip, latitude, longitude, portal_url, user_agent)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        tracker_uuid,
+        content.uuid,
+        type,
+        browser,
+        os,
+        clientIp,
+        geo.latitude,
+        geo.longitude,
+        portalUrl,
+        userAgent,
+      ]
     );
 
     return sendPixel(res);
@@ -100,7 +113,7 @@ router.get('/dateTracking', authRequired, async (req, res) => {
 
     const [events] = await pool.query(
       `SELECT c.uuid AS content_uuid, c.name AS contentname, e.type,
-              e.browser, e.os, e.client_ip, e.created_at
+              e.browser, e.os, e.client_ip, e.latitude, e.longitude, e.created_at
          FROM tracking_events e
          JOIN contents c ON c.uuid = e.content_uuid
         WHERE e.tracker_uuid = ?${contentFilter}
@@ -153,6 +166,102 @@ router.get('/dateTracking', authRequired, async (req, res) => {
   } catch (err) {
     console.error('dateTracking error:', err);
     return res.status(500).json({ error: 'Failed to load report data.' });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Location-wise report (paginated)
+// GET /api/locationTracking?tracker_uuid=&content=&page=1&limit=10
+// ---------------------------------------------------------------------------
+router.get('/locationTracking', authRequired, async (req, res) => {
+  try {
+    const { tracker_uuid, content } = req.query;
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 10));
+
+    if (!tracker_uuid) {
+      return res.status(400).json({ error: 'tracker_uuid is required.' });
+    }
+
+    const [owned] = await pool.query(
+      'SELECT id FROM trackers WHERE uuid = ? AND user_id = ?',
+      [tracker_uuid, req.user.id]
+    );
+    if (!owned.length) return res.status(404).json({ error: 'Tracker not found.' });
+
+    const params = [tracker_uuid];
+    let contentFilter = '';
+    if (content) {
+      contentFilter = ' AND c.name = ?';
+      params.push(content);
+    }
+
+    const [events] = await pool.query(
+      `SELECT e.type, e.client_ip, e.latitude, e.longitude
+         FROM tracking_events e
+         JOIN contents c ON c.uuid = e.content_uuid
+        WHERE e.tracker_uuid = ?${contentFilter}`,
+      params
+    );
+
+    const groups = new Map();
+    for (const ev of events) {
+      let latitude = parseCoord(ev.latitude);
+      let longitude = parseCoord(ev.longitude);
+
+      if ((latitude == null || longitude == null) && ev.client_ip) {
+        const geo = await resolveIpLocation(ev.client_ip);
+        latitude = geo.latitude;
+        longitude = geo.longitude;
+      }
+
+      const key = coordKey(latitude, longitude);
+      if (!key) continue;
+
+      if (!groups.has(key)) {
+        groups.set(key, {
+          latitude,
+          longitude,
+          imp: 0,
+          click: 0,
+          uniqueIps: new Set(),
+        });
+      }
+
+      const g = groups.get(key);
+      if (ev.type === 'imp') {
+        g.imp += 1;
+        if (ev.client_ip) g.uniqueIps.add(ev.client_ip);
+      } else if (ev.type === 'click') {
+        g.click += 1;
+      }
+    }
+
+    const allRows = Array.from(groups.values())
+      .map((g) => ({
+        latitude: g.latitude,
+        longitude: g.longitude,
+        imp: g.imp,
+        click: g.click,
+        unique: g.uniqueIps.size,
+      }))
+      .sort((a, b) => b.imp - a.imp);
+
+    const total = allRows.length;
+    const offset = (page - 1) * limit;
+    const data = allRows.slice(offset, offset + limit);
+
+    return res.json({
+      data,
+      mapPoints: allRows,
+      total,
+      page,
+      limit,
+      totalPages: Math.ceil(total / limit) || 1,
+    });
+  } catch (err) {
+    console.error('locationTracking error:', err);
+    return res.status(500).json({ error: 'Failed to load location data.' });
   }
 });
 
