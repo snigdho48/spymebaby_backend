@@ -8,6 +8,8 @@
     "start": "node server.js",
     "dev": "nodemon server.js",
     "init-db": "node src/db/init.js",
+    "import-data": "node src/db/importData.js",
+    "reset-import": "node src/db/resetImport.js",
     "seed": "node src/db/seed.js"
   },
   "keywords": [
@@ -26,7 +28,8 @@
     "jsonwebtoken": "^9.0.2",
     "morgan": "^1.10.0",
     "mysql2": "^3.11.0",
-    "uuid": "^9.0.1"
+    "uuid": "^9.0.1",
+    "xlsx": "^0.18.5"
   },
   "devDependencies": {
     "nodemon": "^3.1.4"

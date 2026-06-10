@@ -33,10 +33,65 @@ npm run init-db
 ```
 
 This creates the `braincount` database (if missing), applies `src/db/schema.sql`,
+syncs every table/column (add, alter, drop) against `src/db/schema.expected.js`,
 and seeds an admin user matching the credentials the frontend already uses
 (`snigdho` / `azsx1234`).
 
-4. Start the server:
+4. (Optional, local only) Import Excel report files from `../data/`:
+
+```bash
+npm run import-data
+```
+
+Re-import after changes:
+
+```bash
+npm run import-data -- --force
+```
+
+Import one file:
+
+```bash
+npm run import-data -- --file="Yellow (Dhaka) 5th to 31st January 2026.xlsx"
+```
+
+Excel rules:
+
+- Filename (without `.xlsx`) becomes the **tracker name**
+- Tracker/content `created_at` = first Excel **date** minus 1 day (random time)
+- Each row generates `impression` imp events and `clicks` click events for that day
+- Random `client_ip`, `portal_url`, `user_agent`, `latitude`/`longitude`, and
+  `created_at` (random time within the row date)
+
+`.env` options:
+
+| Variable | Default | Purpose |
+| -------- | ------- | ------- |
+| `DATA_DIR` | `../data` | Folder with `.xlsx` files |
+| `IMPORT_USERNAME` | `yellow` | User who owns imported trackers |
+| `IMPORT_CONTENT_NAME` | _(empty)_ | Override content name; default is the tracker name (Excel filename) |
+| `IMPORT_BATCH_SIZE` | `1000` | Insert batch size |
+| `IMPORT_MAX_TOTAL_EVENTS` | _(empty)_ | Optional cap that scales Excel totals (leave empty for exact numbers) |
+| `IMPORT_AVG_FREQUENCY` | `2.2` | YouTube-style reach = impressions ÷ frequency (unique reach < impressions) |
+| `IMPORT_SAMPLE_IMP_PER_DAY` | `80` | Sample impression events per day (map/browser only) |
+| `IMPORT_SAMPLE_CLICKS_PER_DAY` | `20` | Sample click events per day (map/browser only) |
+
+**Excel import is local development only** — do not upload `.xlsx` to production. Exact daily
+impressions/clicks are stored in `campaign_daily_stats`; a small sample of events powers the map.
+
+Wipe and re-import everything:
+
+```bash
+npm run import-data -- --reset
+```
+
+Or reset only:
+
+```bash
+npm run reset-import
+```
+
+5. Start the server:
 
 ```bash
 npm run dev    # auto-reload (nodemon)
@@ -69,7 +124,7 @@ All routes are prefixed with `/api`.
 | POST | `/updatetracker` | Bearer | Update `{ uuid, name, description, content: [{ name, uuid? }] }` |
 | DELETE | `/tracker/:uuid` | Bearer | Delete a tracker |
 | GET | `/dashboarddata` | Bearer | Totals + per-day impressions |
-| GET | `/dateTracking?tracker_uuid=&content=` | Bearer | Per-content/day report rows |
+| GET | `/dateTracking?tracker_uuid=&content=` | Bearer | `{ data: per-day rows, totals: { imp, click, unique } }` — unique reach = distinct impression viewer IPs (≤ impressions) |
 | GET | `/track?tracker_uuid=&tag=&portal_url=&client_ip=&userAgent=` | – | Tracking pixel (returns a 1×1 GIF) |
 
 ### How the tracking pixel works

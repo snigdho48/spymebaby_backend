@@ -28,6 +28,9 @@ async function init() {
   await connection.end();
 
   console.log('Schema applied.');
+  const { migrate } = require('./migrate');
+  await migrate();
+  console.log('Schema sync complete.');
   await seed();
   console.log('Database initialization complete.');
   process.exit(0);

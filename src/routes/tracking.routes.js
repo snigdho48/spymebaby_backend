@@ -3,6 +3,12 @@ const { pool } = require('../config/db');
 const { authRequired } = require('../middleware/auth');
 const { parseUserAgent } = require('../utils/ua');
 const { resolveIpLocation, coordKey, parseCoord } = require('../utils/geoip');
+const {
+  buildDateTrackingFromStats,
+  isImportedTracker,
+  periodReachFromImpressions,
+  DEFAULT_AVG_FREQUENCY,
+} = require('../utils/reportStats');
 
 const router = express.Router();
 
@@ -104,6 +110,12 @@ router.get('/dateTracking', authRequired, async (req, res) => {
     );
     if (!owned.length) return res.status(404).json({ error: 'Tracker not found.' });
 
+    if (await isImportedTracker(pool, tracker_uuid)) {
+      return res.json(
+        await buildDateTrackingFromStats(pool, { tracker_uuid, content, ymd })
+      );
+    }
+
     const params = [tracker_uuid];
     let contentFilter = '';
     if (content) {
@@ -121,8 +133,13 @@ router.get('/dateTracking', authRequired, async (req, res) => {
       params
     );
 
-    // Group by content + day.
+    // Group by content + day. Unique reach = distinct viewers (impression IPs only),
+    // matching YouTube/Google Ads reach (always <= impressions for that day).
     const groups = new Map();
+    const periodUniqueIps = new Set();
+    let totalImp = 0;
+    let totalClick = 0;
+
     for (const ev of events) {
       const dateStr = ymd(ev.created_at);
       const key = `${ev.contentname}|${dateStr}`;
@@ -142,27 +159,43 @@ router.get('/dateTracking', authRequired, async (req, res) => {
       const g = groups.get(key);
       if (ev.type === 'imp') {
         g.imp += 1;
-        if (ev.client_ip) g.uniqueIps.add(ev.client_ip);
-        g.browserMap[ev.browser] = (g.browserMap[ev.browser] || 0) + 1;
-        g.osMap[ev.os] = (g.osMap[ev.os] || 0) + 1;
+        totalImp += 1;
+        if (ev.client_ip) {
+          g.uniqueIps.add(ev.client_ip);
+          periodUniqueIps.add(ev.client_ip);
+        }
       } else if (ev.type === 'click') {
         g.click += 1;
+        totalClick += 1;
+      }
+      if (ev.browser) {
+        g.browserMap[ev.browser] = (g.browserMap[ev.browser] || 0) + 1;
+      }
+      if (ev.os) {
+        g.osMap[ev.os] = (g.osMap[ev.os] || 0) + 1;
       }
     }
 
-    const result = Array.from(groups.values()).map((g) => ({
+    const data = Array.from(groups.values()).map((g) => ({
       uuid: g.uuid,
       contentname: g.contentname,
       name: g.name,
       created_at: g.created_at,
       imp: g.imp,
       click: g.click,
-      unique: g.uniqueIps.size,
+      unique: Math.min(g.uniqueIps.size, g.imp),
       browser: [g.browserMap],
       os: [g.osMap],
     }));
 
-    return res.json(result);
+    return res.json({
+      data,
+      totals: {
+        imp: totalImp,
+        click: totalClick,
+        unique: Math.min(periodUniqueIps.size, totalImp),
+      },
+    });
   } catch (err) {
     console.error('dateTracking error:', err);
     return res.status(500).json({ error: 'Failed to load report data.' });
@@ -243,7 +276,7 @@ router.get('/locationTracking', authRequired, async (req, res) => {
         longitude: g.longitude,
         imp: g.imp,
         click: g.click,
-        unique: g.uniqueIps.size,
+        unique: Math.min(g.uniqueIps.size, g.imp),
       }))
       .sort((a, b) => b.imp - a.imp);
 
@@ -272,37 +305,110 @@ router.get('/locationTracking', authRequired, async (req, res) => {
 // ---------------------------------------------------------------------------
 router.get('/dashboarddata', authRequired, async (req, res) => {
   try {
-    const [events] = await pool.query(
-      `SELECT e.type, e.client_ip, e.created_at
-         FROM tracking_events e
-         JOIN trackers t ON t.uuid = e.tracker_uuid
-        WHERE t.user_id = ?
-        ORDER BY e.created_at ASC`,
+    const [statRows] = await pool.query(
+      `SELECT s.stat_date, s.impressions, s.clicks
+         FROM campaign_daily_stats s
+         JOIN trackers t ON t.uuid = s.tracker_uuid
+        WHERE t.user_id = ?`,
       [req.user.id]
     );
 
+    const [imported] = await pool.query(
+      `SELECT DISTINCT di.tracker_uuid
+         FROM data_imports di
+         JOIN trackers t ON t.uuid = di.tracker_uuid
+        WHERE t.user_id = ?`,
+      [req.user.id]
+    );
+    const importedUuids = imported.map((r) => r.tracker_uuid);
+
     let Totalimp = 0;
     let Totalclick = 0;
-    const uniqueIps = new Set();
     const perDay = new Map();
 
-    for (const ev of events) {
-      if (ev.type === 'imp') {
-        Totalimp += 1;
-        if (ev.client_ip) uniqueIps.add(ev.client_ip);
-        const dateStr = ymd(ev.created_at);
-        perDay.set(dateStr, (perDay.get(dateStr) || 0) + 1);
-      } else if (ev.type === 'click') {
-        Totalclick += 1;
+    for (const row of statRows) {
+      const imp = Number(row.impressions) || 0;
+      const clk = Number(row.clicks) || 0;
+      Totalimp += imp;
+      Totalclick += clk;
+      const dateStr =
+        row.stat_date instanceof Date
+          ? ymd(row.stat_date)
+          : String(row.stat_date).slice(0, 10);
+      perDay.set(dateStr, (perDay.get(dateStr) || 0) + imp);
+    }
+
+    const uniqueIps = new Set();
+    let eventImp = 0;
+    let eventClick = 0;
+
+    if (importedUuids.length) {
+      const placeholders = importedUuids.map(() => '?').join(',');
+      const [events] = await pool.query(
+        `SELECT e.type, e.client_ip, e.created_at
+           FROM tracking_events e
+           JOIN trackers t ON t.uuid = e.tracker_uuid
+          WHERE t.user_id = ?
+            AND e.tracker_uuid NOT IN (${placeholders})
+          ORDER BY e.created_at ASC`,
+        [req.user.id, ...importedUuids]
+      );
+
+      for (const ev of events) {
+        if (ev.type === 'imp') {
+          eventImp += 1;
+          if (ev.client_ip) uniqueIps.add(ev.client_ip);
+          const dateStr = ymd(ev.created_at);
+          perDay.set(dateStr, (perDay.get(dateStr) || 0) + 1);
+        } else if (ev.type === 'click') {
+          eventClick += 1;
+        }
+      }
+    } else {
+      const [events] = await pool.query(
+        `SELECT e.type, e.client_ip, e.created_at
+           FROM tracking_events e
+           JOIN trackers t ON t.uuid = e.tracker_uuid
+          WHERE t.user_id = ?
+          ORDER BY e.created_at ASC`,
+        [req.user.id]
+      );
+
+      for (const ev of events) {
+        if (ev.type === 'imp') {
+          eventImp += 1;
+          if (ev.client_ip) uniqueIps.add(ev.client_ip);
+          const dateStr = ymd(ev.created_at);
+          perDay.set(dateStr, (perDay.get(dateStr) || 0) + 1);
+        } else if (ev.type === 'click') {
+          eventClick += 1;
+        }
       }
     }
+
+    Totalimp += eventImp;
+    Totalclick += eventClick;
+
+    const importedUnique = periodReachFromImpressions(
+      Totalimp - eventImp,
+      DEFAULT_AVG_FREQUENCY
+    );
+    const liveUnique = Math.min(uniqueIps.size, eventImp);
+    const TotalUnique =
+      importedUuids.length > 0 || statRows.length > 0
+        ? importedUnique + liveUnique
+        : Math.min(uniqueIps.size, eventImp);
 
     const data = Array.from(perDay.entries())
       .sort((a, b) => new Date(a[0]) - new Date(b[0]))
       .map(([date, imp]) => ({ date, imp }));
 
     return res.json({
-      total: { Totalimp, Totalclick, TotalUnique: uniqueIps.size },
+      total: {
+        Totalimp,
+        Totalclick,
+        TotalUnique,
+      },
       data,
     });
   } catch (err) {

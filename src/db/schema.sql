@@ -55,3 +55,26 @@ CREATE TABLE IF NOT EXISTS tracking_events (
   INDEX idx_event_type (type),
   INDEX idx_event_created (created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS data_imports (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  filename VARCHAR(255) NOT NULL UNIQUE,
+  tracker_uuid CHAR(36) NOT NULL,
+  event_count BIGINT NOT NULL DEFAULT 0,
+  imported_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- Exact daily totals from local Excel import (not used on production pixel-only trackers).
+CREATE TABLE IF NOT EXISTS campaign_daily_stats (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  tracker_uuid CHAR(36) NOT NULL,
+  content_uuid CHAR(36) NOT NULL,
+  stat_date DATE NOT NULL,
+  impressions BIGINT NOT NULL DEFAULT 0,
+  clicks BIGINT NOT NULL DEFAULT 0,
+  unique_reach BIGINT NOT NULL DEFAULT 0,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE KEY uq_campaign_day (tracker_uuid, content_uuid, stat_date),
+  INDEX idx_campaign_tracker (tracker_uuid),
+  INDEX idx_campaign_date (stat_date)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
