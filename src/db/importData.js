@@ -5,11 +5,12 @@ const { importAllFromDataDir } = require('./importExcel');
 const { resetImportedData } = require('./resetImport');
 
 function parseArgs(argv) {
-  const args = { force: false, reset: false, file: '' };
+  const args = { force: false, reset: false, file: '', username: '' };
   for (const arg of argv) {
     if (arg === '--force') args.force = true;
     else if (arg === '--reset') args.reset = true;
     else if (arg.startsWith('--file=')) args.file = arg.slice('--file='.length);
+    else if (arg.startsWith('--username=')) args.username = arg.slice('--username='.length);
   }
   return args;
 }
@@ -19,7 +20,7 @@ async function main() {
   const dataDir =
     process.env.DATA_DIR || path.join(__dirname, '../../../data');
   const username =
-    process.env.IMPORT_USERNAME || process.env.SEED_USERNAME || 'snigdho';
+    args.username || process.env.IMPORT_USERNAME || 'nusrat';
   const contentName = process.env.IMPORT_CONTENT_NAME || '';
   const batchSize = Number(process.env.IMPORT_BATCH_SIZE) || 1000;
   const maxTotalEvents = Number(process.env.IMPORT_MAX_TOTAL_EVENTS) || 0;

@@ -9,6 +9,10 @@ const {
   periodReachFromImpressions,
   DEFAULT_AVG_FREQUENCY,
 } = require('../utils/reportStats');
+const {
+  findAccessibleTracker,
+  trackerOwnerFilter,
+} = require('../utils/trackerAccess');
 
 const router = express.Router();
 
@@ -104,11 +108,8 @@ router.get('/dateTracking', authRequired, async (req, res) => {
       return res.status(400).json({ error: 'tracker_uuid is required.' });
     }
 
-    const [owned] = await pool.query(
-      'SELECT id FROM trackers WHERE uuid = ? AND user_id = ?',
-      [tracker_uuid, req.user.id]
-    );
-    if (!owned.length) return res.status(404).json({ error: 'Tracker not found.' });
+    const tracker = await findAccessibleTracker(pool, tracker_uuid, req.user);
+    if (!tracker) return res.status(404).json({ error: 'Tracker not found.' });
 
     if (await isImportedTracker(pool, tracker_uuid)) {
       return res.json(
@@ -168,11 +169,13 @@ router.get('/dateTracking', authRequired, async (req, res) => {
         g.click += 1;
         totalClick += 1;
       }
-      if (ev.browser) {
-        g.browserMap[ev.browser] = (g.browserMap[ev.browser] || 0) + 1;
-      }
-      if (ev.os) {
-        g.osMap[ev.os] = (g.osMap[ev.os] || 0) + 1;
+      if (ev.type === 'imp') {
+        if (ev.browser) {
+          g.browserMap[ev.browser] = (g.browserMap[ev.browser] || 0) + 1;
+        }
+        if (ev.os) {
+          g.osMap[ev.os] = (g.osMap[ev.os] || 0) + 1;
+        }
       }
     }
 
@@ -216,11 +219,8 @@ router.get('/locationTracking', authRequired, async (req, res) => {
       return res.status(400).json({ error: 'tracker_uuid is required.' });
     }
 
-    const [owned] = await pool.query(
-      'SELECT id FROM trackers WHERE uuid = ? AND user_id = ?',
-      [tracker_uuid, req.user.id]
-    );
-    if (!owned.length) return res.status(404).json({ error: 'Tracker not found.' });
+    const tracker = await findAccessibleTracker(pool, tracker_uuid, req.user);
+    if (!tracker) return res.status(404).json({ error: 'Tracker not found.' });
 
     const params = [tracker_uuid];
     let contentFilter = '';
@@ -305,20 +305,22 @@ router.get('/locationTracking', authRequired, async (req, res) => {
 // ---------------------------------------------------------------------------
 router.get('/dashboarddata', authRequired, async (req, res) => {
   try {
+    const ownerFilter = trackerOwnerFilter(req.user, 't');
+
     const [statRows] = await pool.query(
       `SELECT s.stat_date, s.impressions, s.clicks
          FROM campaign_daily_stats s
          JOIN trackers t ON t.uuid = s.tracker_uuid
-        WHERE t.user_id = ?`,
-      [req.user.id]
+        WHERE 1=1${ownerFilter.sql}`,
+      ownerFilter.params
     );
 
     const [imported] = await pool.query(
       `SELECT DISTINCT di.tracker_uuid
          FROM data_imports di
          JOIN trackers t ON t.uuid = di.tracker_uuid
-        WHERE t.user_id = ?`,
-      [req.user.id]
+        WHERE 1=1${ownerFilter.sql}`,
+      ownerFilter.params
     );
     const importedUuids = imported.map((r) => r.tracker_uuid);
 
@@ -348,10 +350,10 @@ router.get('/dashboarddata', authRequired, async (req, res) => {
         `SELECT e.type, e.client_ip, e.created_at
            FROM tracking_events e
            JOIN trackers t ON t.uuid = e.tracker_uuid
-          WHERE t.user_id = ?
+          WHERE 1=1${ownerFilter.sql}
             AND e.tracker_uuid NOT IN (${placeholders})
           ORDER BY e.created_at ASC`,
-        [req.user.id, ...importedUuids]
+        [...ownerFilter.params, ...importedUuids]
       );
 
       for (const ev of events) {
@@ -369,9 +371,9 @@ router.get('/dashboarddata', authRequired, async (req, res) => {
         `SELECT e.type, e.client_ip, e.created_at
            FROM tracking_events e
            JOIN trackers t ON t.uuid = e.tracker_uuid
-          WHERE t.user_id = ?
+          WHERE 1=1${ownerFilter.sql}
           ORDER BY e.created_at ASC`,
-        [req.user.id]
+        ownerFilter.params
       );
 
       for (const ev of events) {

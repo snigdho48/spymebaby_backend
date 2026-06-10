@@ -10,6 +10,7 @@
     "init-db": "node src/db/init.js",
     "import-data": "node src/db/importData.js",
     "reset-import": "node src/db/resetImport.js",
+    "assign-import-owners": "node src/db/assignImportOwners.js",
     "seed": "node src/db/seed.js"
   },
   "keywords": [

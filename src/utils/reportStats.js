@@ -10,8 +10,32 @@ async function isImportedTracker(pool, trackerUuid) {
   return rows.length > 0;
 }
 
+/** Spread sample proportions across a day's impression total (display only; imp unchanged). */
+function distributeBreakdownToTotal(map, total) {
+  if (!total || total <= 0) return {};
+  const entries = Object.entries(map).filter(([, v]) => v > 0);
+  if (!entries.length) return {};
+
+  const sum = entries.reduce((s, [, v]) => s + v, 0);
+  if (sum <= 0) return {};
+
+  const result = {};
+  let assigned = 0;
+  entries.forEach(([key, value], index) => {
+    if (index === entries.length - 1) {
+      result[key] = total - assigned;
+    } else {
+      const portion = Math.round((value / sum) * total);
+      result[key] = portion;
+      assigned += portion;
+    }
+  });
+  return result;
+}
+
 function mergeBrowserOsMaps(groups, events, ymd) {
   for (const ev of events) {
+    if (ev.type !== 'imp') continue;
     const dateStr = ymd(ev.created_at);
     const key = `${ev.contentname}|${dateStr}`;
     const g = groups.get(key);
@@ -69,7 +93,7 @@ async function buildDateTrackingFromStats(pool, { tracker_uuid, content, ymd }) 
   }
 
   const [events] = await pool.query(
-    `SELECT c.name AS contentname, e.browser, e.os, e.created_at
+    `SELECT c.name AS contentname, e.type, e.browser, e.os, e.created_at
        FROM tracking_events e
        JOIN contents c ON c.uuid = e.content_uuid
       WHERE e.tracker_uuid = ?${contentFilter}
@@ -86,8 +110,8 @@ async function buildDateTrackingFromStats(pool, { tracker_uuid, content, ymd }) 
     imp: g.imp,
     click: g.click,
     unique: g.unique,
-    browser: [g.browserMap],
-    os: [g.osMap],
+    browser: [distributeBreakdownToTotal(g.browserMap, g.imp)],
+    os: [distributeBreakdownToTotal(g.osMap, g.imp)],
   }));
 
   return {

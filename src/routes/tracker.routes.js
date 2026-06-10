@@ -3,16 +3,26 @@ const crypto = require('crypto');
 const { v4: uuidv4 } = require('uuid');
 const { pool } = require('../config/db');
 const { authRequired } = require('../middleware/auth');
+const { findAccessibleTracker } = require('../utils/trackerAccess');
 
 const router = express.Router();
 
 const genCode = () => crypto.randomBytes(10).toString('hex');
 
 // Builds the nested { ...tracker, content: [...] } shape the dashboard expects.
-async function getTrackersForUser(userId) {
+async function getTrackersForUser(user) {
+  const admin = user?.role === 'admin';
   const [trackers] = await pool.query(
-    'SELECT id, uuid, name, description, created_at FROM trackers WHERE user_id = ? ORDER BY id ASC',
-    [userId]
+    admin
+      ? `SELECT t.id, t.uuid, t.name, t.description, t.created_at,
+                u.username AS owner_username, u.name AS owner_name
+           FROM trackers t
+           JOIN users u ON u.id = t.user_id
+          ORDER BY t.created_at DESC, t.id DESC`
+      : `SELECT id, uuid, name, description, created_at
+           FROM trackers WHERE user_id = ?
+          ORDER BY created_at DESC, id DESC`,
+    admin ? [] : [user.id]
   );
   if (!trackers.length) return [];
 
@@ -40,7 +50,7 @@ async function getTrackersForUser(userId) {
 // GET /api/trackers
 router.get('/trackers', authRequired, async (req, res) => {
   try {
-    const data = await getTrackersForUser(req.user.id);
+    const data = await getTrackersForUser(req.user);
     return res.json(data);
   } catch (err) {
     console.error('trackers error:', err);
@@ -94,17 +104,15 @@ router.post('/updatetracker', authRequired, async (req, res) => {
     if (!uuid) return res.status(400).json({ error: 'Tracker uuid is required.' });
     if (!name) return res.status(400).json({ error: 'Tracker name is required.' });
 
-    const [owned] = await conn.query(
-      'SELECT id FROM trackers WHERE uuid = ? AND user_id = ?',
-      [uuid, req.user.id]
-    );
-    if (!owned.length) return res.status(404).json({ error: 'Tracker not found.' });
+    const tracker = await findAccessibleTracker(conn, uuid, req.user);
+    if (!tracker) return res.status(404).json({ error: 'Tracker not found.' });
 
     await conn.beginTransaction();
-    await conn.query(
-      'UPDATE trackers SET name = ?, description = ? WHERE uuid = ? AND user_id = ?',
-      [name, description ?? '', uuid, req.user.id]
-    );
+    await conn.query('UPDATE trackers SET name = ?, description = ? WHERE uuid = ?', [
+      name,
+      description ?? '',
+      uuid,
+    ]);
 
     const items = Array.isArray(content) ? content : [];
     for (const item of items) {
@@ -141,19 +149,13 @@ router.post('/updatetracker', authRequired, async (req, res) => {
 router.delete('/tracker/:uuid', authRequired, async (req, res) => {
   try {
     const { uuid } = req.params;
-    const [owned] = await pool.query(
-      'SELECT id FROM trackers WHERE uuid = ? AND user_id = ?',
-      [uuid, req.user.id]
-    );
-    if (!owned.length) return res.status(404).json({ error: 'Tracker not found.' });
+    const tracker = await findAccessibleTracker(pool, uuid, req.user);
+    if (!tracker) return res.status(404).json({ error: 'Tracker not found.' });
 
     // Remove related events first (no FK on events), then the tracker
     // (contents cascade via FK).
     await pool.query('DELETE FROM tracking_events WHERE tracker_uuid = ?', [uuid]);
-    await pool.query('DELETE FROM trackers WHERE uuid = ? AND user_id = ?', [
-      uuid,
-      req.user.id,
-    ]);
+    await pool.query('DELETE FROM trackers WHERE uuid = ?', [uuid]);
 
     return res.json({ success: true });
   } catch (err) {
